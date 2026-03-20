@@ -1,0 +1,3 @@
+[submodule "CriticalProcess"]
+	path = CriticalProcess
+	url = https://github.com/vicouncil/CriticalProcess.git
