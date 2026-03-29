@@ -305,6 +305,13 @@ def _format_delta(delta: timedelta) -> str:
     return " ".join(parts)
 
 
+def _is_within_post_bedtime_window(next_bedtime: datetime, now: datetime) -> bool:
+    """Return True when now is within 4 hours after the most recent bedtime."""
+    most_recent_bedtime = next_bedtime - timedelta(days=1)
+    elapsed = now - most_recent_bedtime
+    return timedelta(0) <= elapsed <= _ADDICT_WINDOW
+
+
 def _wait_until(target: datetime) -> None:
     while True:
         now = datetime.now()
@@ -332,7 +339,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", "-c", dest="config", default=_DEFAULT_CONFIG,
                         help=f"Path to JSON config file (default: {_DEFAULT_CONFIG}).")
     parser.add_argument("--addict-mode", dest="addict_mode", action="store_true",
-                        help="Enable addict mode override (shutdown in 10 minutes when started within 4 hours of bedtime).")
+                        help="Enable addict mode override (shutdown in 10 minutes when started within 4 hours after bedtime).")
     parser.add_argument("--no-addict-mode", dest="addict_mode", action="store_false",
                         help="Disable addict mode override, even if config enables it.")
     parser.add_argument("--log-file", dest="log_file",
@@ -363,12 +370,12 @@ def main() -> None:
 
     _configure_file_logging(log_file)
 
+    now = datetime.now()
     target = _parse_time_string(time_str)
     if addict_mode:
-        until_bedtime = target - datetime.now()
-        if until_bedtime <= _ADDICT_WINDOW:
-            target = datetime.now() + _ADDICT_SHUTDOWN_DELAY
-            _message("Addict mode active: started within 4 hours of bedtime, shutdown forced in 10 minutes.")
+        if _is_within_post_bedtime_window(target, now):
+            target = now + _ADDICT_SHUTDOWN_DELAY
+            _message("Addict mode active: started within 4 hours after bedtime, shutdown forced in 10 minutes.")
 
     _message(f"Shutdown scheduled for {target.strftime('%Y-%m-%d %H:%M:%S')} ({_format_delta(target - datetime.now())} from now).")
 
