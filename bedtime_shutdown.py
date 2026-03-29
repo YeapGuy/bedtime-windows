@@ -4,6 +4,7 @@ import ctypes
 from ctypes import wintypes
 from datetime import datetime, timedelta
 import json
+import logging
 from pathlib import Path
 import signal
 import subprocess
@@ -20,6 +21,8 @@ DEBUG = False
 _DEFAULT_CONFIG = "bedtime_config.json"
 _TIME_KEY = "shutdown_time"
 _ADDICT_MODE_KEY = "addict_mode"
+_LOG_FILE_KEY = "log_file"
+_LOG_FILE_FROM_CONFIG = "__FROM_CONFIG__"
 
 _ADDICT_WINDOW = timedelta(hours=4)
 _ADDICT_SHUTDOWN_DELAY = timedelta(minutes=10)
@@ -42,6 +45,32 @@ _lresult_type = getattr(wintypes, "LRESULT", None)
 if _lresult_type is None:
     _lresult_type = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
 
+_logger = logging.getLogger("bedtime_shutdown")
+
+
+def _configure_file_logging(log_file: str | None) -> None:
+    if not log_file:
+        return
+    log_path = Path(log_file)
+    if log_path.parent and not log_path.parent.exists():
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _logger.setLevel(logging.INFO)
+    _logger.propagate = False
+    if _logger.handlers:
+        _logger.handlers.clear()
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    _logger.addHandler(handler)
+    _logger.info("File logging enabled: %s", log_path)
+
+
+def _message(text: str, level: int = logging.INFO) -> None:
+    print(text)
+    if _logger.handlers:
+        _logger.log(level, text)
+
 
 def _mark_process_critical() -> Callable[[], None]:
     """Elevate privileges and mark the current process as critical."""
@@ -57,9 +86,10 @@ def _mark_process_critical() -> Callable[[], None]:
         released = True
         was_critical = criticalprocess.wintypes.BOOLEAN(0)
         criticalprocess.RtlSetProcessIsCritical(False, ctypes.byref(was_critical), False)
+        _message("Critical status removed.")
 
     atexit.register(_clear_critical)
-    print(f"Running critical process with PID: {os.getpid()}...")
+    _message(f"Running critical process with PID: {os.getpid()}...")
     _release_critical_ref = _clear_critical
     return _clear_critical
 
@@ -201,7 +231,7 @@ def _install_session_message_window() -> None:
     atexit.register(_shutdown_window_cleanup)
 
 def _handle_signal(signum: int, frame: object | None) -> None:
-    print("Received interrupt; exiting cleanly.")
+    _message("Received interrupt; exiting cleanly.")
     if _release_critical_ref is not None:
         _release_critical_ref()
     sys.exit(0)
@@ -251,6 +281,17 @@ def _config_addict_mode(data: dict[str, object]) -> bool:
     return value
 
 
+def _config_log_file(data: dict[str, object]) -> str | None:
+    value = data.get(_LOG_FILE_KEY, None)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"'{_LOG_FILE_KEY}' must be a string path or null.")
+    if not value.strip():
+        return None
+    return value
+
+
 def _format_delta(delta: timedelta) -> str:
     total_seconds = int(delta.total_seconds())
     hours, remainder = divmod(total_seconds, 3600)
@@ -270,7 +311,7 @@ def _wait_until(target: datetime) -> None:
         if now >= target:
             return
         remaining = target - now
-        print(f"Time until shutdown: {_format_delta(remaining)}")
+        _message(f"Time until shutdown: {_format_delta(remaining)}")
         sleep_for = min(remaining.total_seconds(), 60)
         time.sleep(max(1, sleep_for))
 
@@ -294,9 +335,14 @@ def _parse_args() -> argparse.Namespace:
                         help="Enable addict mode override (shutdown in 10 minutes when started within 4 hours of bedtime).")
     parser.add_argument("--no-addict-mode", dest="addict_mode", action="store_false",
                         help="Disable addict mode override, even if config enables it.")
+    parser.add_argument("--log-file", dest="log_file",
+                        help="Write status output to this log file path.")
+    parser.add_argument("--no-log-file", dest="log_file", action="store_const", const=None,
+                        help="Disable file logging, even if config enables it.")
     parser.add_argument("--no-force", dest="force", action="store_false",
                         help="Do not force-close running applications during shutdown.")
     parser.set_defaults(addict_mode=None)
+    parser.set_defaults(log_file=_LOG_FILE_FROM_CONFIG)
     parser.set_defaults(force=True)
     return parser.parse_args()
 
@@ -308,20 +354,23 @@ def main() -> None:
     config_data: dict[str, object] = {}
     if config_path.exists():
         config_data = _load_config(config_path)
-    elif args.time_str is None or args.addict_mode is None:
+    elif args.time_str is None or args.addict_mode is None or args.log_file == _LOG_FILE_FROM_CONFIG:
         raise FileNotFoundError(f"Config file not found at {config_path}.")
 
     time_str = args.time_str or _config_time(config_data)
     addict_mode = _config_addict_mode(config_data) if args.addict_mode is None else args.addict_mode
+    log_file = _config_log_file(config_data) if args.log_file == _LOG_FILE_FROM_CONFIG else args.log_file
+
+    _configure_file_logging(log_file)
 
     target = _parse_time_string(time_str)
     if addict_mode:
         until_bedtime = target - datetime.now()
         if until_bedtime <= _ADDICT_WINDOW:
             target = datetime.now() + _ADDICT_SHUTDOWN_DELAY
-            print("Addict mode active: started within 4 hours of bedtime, shutdown forced in 10 minutes.")
+            _message("Addict mode active: started within 4 hours of bedtime, shutdown forced in 10 minutes.")
 
-    print(f"Shutdown scheduled for {target.strftime('%Y-%m-%d %H:%M:%S')} ({_format_delta(target - datetime.now())} from now).")
+    _message(f"Shutdown scheduled for {target.strftime('%Y-%m-%d %H:%M:%S')} ({_format_delta(target - datetime.now())} from now).")
 
     signal.signal(signal.SIGINT, _handle_signal)
     if hasattr(signal, "SIGBREAK"):
@@ -338,13 +387,13 @@ def main() -> None:
 
     try:
         _wait_until(target)
-        print("Initiating system shutdown...")
+        _message("Initiating system shutdown...")
         release_critical()  # Drop critical status before shutting down.
         _run_shutdown(force=args.force)
     except KeyboardInterrupt:
-        print("Interrupted before shutdown.")
+        _message("Interrupted before shutdown.")
     except Exception as exc:
-        print(f"Error: {exc}")
+        _message(f"Error: {exc}", level=logging.ERROR)
         sys.exit(1)
 
 

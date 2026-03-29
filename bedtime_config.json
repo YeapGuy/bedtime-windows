@@ -1,4 +1,5 @@
 {
   "shutdown_time": "22:00",
-  "addict_mode": true
+  "addict_mode": true,
+  "log_file": "bedtime.log"
 }
